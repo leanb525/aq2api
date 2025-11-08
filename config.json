@@ -1,0 +1,15 @@
+{
+  "logging": {
+    "enabled": false,
+    "level": "INFO",
+    "log_requests": true,
+    "log_responses": true,
+    "log_token_refresh": true,
+    "max_log_length": 500
+  },
+  "performance": {
+    "stream_chunk_size": 1024,
+    "buffer_max_size": 10240,
+    "token_refresh_margin_seconds": 300
+  }
+}
