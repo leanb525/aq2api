@@ -5,7 +5,7 @@ import sqlite3
 import time
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Generator
+from typing import Dict, Any, List, Optional, Generator, Union
 
 import requests
 import urllib3
@@ -34,10 +34,15 @@ def load_config() -> Dict:
             "stream_chunk_size": 1024,
             "buffer_max_size": 10240,
             "token_refresh_margin_seconds": 300
+        },
+        "ssl": {
+            "verify_oidc": True,
+            "ca_bundle": ""
         }
     }
 
 CONFIG = load_config()
+SSL_CONFIG = CONFIG.get("ssl", {})
 
 # 配置日志
 log_config = CONFIG.get("logging", {})
@@ -53,6 +58,82 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+
+def _parse_bool(value: Optional[str]) -> Optional[bool]:
+    """将环境变量解析为布尔值"""
+    if value is None:
+        return None
+    value = value.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def resolve_oidc_verify_option() -> Union[bool, str]:
+    """
+    决定刷新 OIDC token 时 requests 的 verify 参数:
+      * 优先使用环境变量或配置指定的 CA bundle 路径
+      * 支持通过环境变量关闭验证（仅用于调试）
+    """
+    ca_bundle = (
+        os.environ.get("AMAZONQ_CA_BUNDLE")
+        or os.environ.get("AWS_CA_BUNDLE")
+        or os.environ.get("REQUESTS_CA_BUNDLE")
+        or SSL_CONFIG.get("ca_bundle")
+    )
+
+    if ca_bundle:
+        if os.path.exists(ca_bundle):
+            logger.debug(f"使用 CA bundle 验证 OIDC 请求: {ca_bundle}")
+            return ca_bundle
+        logger.warning(f"指定的 CA bundle 路径不存在: {ca_bundle}")
+
+    disable_verify = _parse_bool(
+        os.environ.get("DISABLE_AMAZONQ_SSL_VERIFY")
+        or os.environ.get("DISABLE_OIDC_SSL_VERIFY")
+        or os.environ.get("DISABLE_SSL_VERIFY")
+    )
+    if disable_verify:
+        logger.warning("OIDC token 请求已禁用 SSL 验证，仅建议在调试环境中使用。")
+        return False
+
+    env_verify = _parse_bool(
+        os.environ.get("AMAZONQ_SSL_VERIFY") or os.environ.get("OIDC_SSL_VERIFY")
+    )
+    if env_verify is not None:
+        return env_verify
+
+    return bool(SSL_CONFIG.get("verify_oidc", SSL_CONFIG.get("verify", True)))
+
+
+def _normalize_stream_flag(value: Any) -> Optional[bool]:
+    """尽可能将各种形式的 stream 标记转换为布尔值"""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        val = value.strip().lower()
+        if not val:
+            return None
+        if val in {"true", "1", "yes", "on", "sse", "stream", "delta"}:
+            return True
+        if val in {"false", "0", "no", "off"}:
+            return False
+        return None
+    if isinstance(value, dict):
+        for key in ("type", "mode", "format", "value", "enabled"):
+            if key in value:
+                normalized = _normalize_stream_flag(value[key])
+                if normalized is not None:
+                    return normalized
+        return None
+    return bool(value)
+
 # Amazon Q 配置
 AMAZONQ_ENDPOINT = "https://codewhisperer.us-east-1.amazonaws.com"
 SSO_OIDC_ENDPOINT = "https://oidc.us-east-1.amazonaws.com"
@@ -61,6 +142,21 @@ SSO_OIDC_ENDPOINT = "https://oidc.us-east-1.amazonaws.com"
 STREAM_CHUNK_SIZE = CONFIG.get("performance", {}).get("stream_chunk_size", 1024)
 BUFFER_MAX_SIZE = CONFIG.get("performance", {}).get("buffer_max_size", 10240)
 TOKEN_REFRESH_MARGIN = CONFIG.get("performance", {}).get("token_refresh_margin_seconds", 300)
+
+# Anthropic API 版本
+ANTHROPIC_API_VERSION = os.environ.get("ANTHROPIC_VERSION", "2023-06-01")
+
+# 识别需要强制流式的客户端（Claude Code / Anthropic IDE 等）
+STREAMING_USER_AGENT_HINTS = [
+    "claudecode",
+    "claude code",
+    "claude-code",
+    "anthropic/ide",
+    "anthropic-ide",
+    "anthropic-client",
+    "amazon q developer",
+    "amazonq-ide",
+]
 
 
 class AmazonQAuthManager:
@@ -155,18 +251,27 @@ class AmazonQAuthManager:
 
         url = f"{SSO_OIDC_ENDPOINT}/token"
 
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": self.credentials['refresh_token'],
-            "client_id": self.credentials['client_id'],
-            "client_secret": self.credentials['client_secret']
+        client_id = self.credentials.get('client_id') or self.credentials.get('clientId')
+        client_secret = self.credentials.get('client_secret') or self.credentials.get('clientSecret')
+        refresh_token = self.credentials.get('refresh_token') or self.credentials.get('refreshToken')
+
+        if not all([client_id, client_secret, refresh_token]):
+            raise ValueError("client_id/client_secret/refresh_token 缺失，无法刷新 token")
+
+        payload = {
+            "grantType": "refresh_token",
+            "refreshToken": refresh_token,
+            "clientId": client_id,
+            "clientSecret": client_secret
         }
+
+        verify_option = resolve_oidc_verify_option()
 
         try:
             logger.info(f"正在通过 API 刷新 token，URL: {url}")
-            logger.info(f"请求数据: grant_type={data['grant_type']}, client_id={data['client_id'][:20]}...")
+            logger.info(f"请求数据: grantType={payload['grantType']}, clientId={str(client_id)[:8]}***")
 
-            response = requests.post(url, data=data, timeout=30)
+            response = requests.post(url, json=payload, timeout=30, verify=verify_option)
 
             logger.info(f"Token 刷新响应状态码: {response.status_code}")
 
@@ -400,59 +505,39 @@ class OpenAIConverter:
         return ""
 
     @staticmethod
-    def parse_event_stream(raw_response: str) -> str:
-        """解析 AWS Event Stream 格式的响应
-        
-        使用 JSON 解析器逐个提取 {"content":"..."} 对象，
-        正确处理转义字符和特殊字符（如 HTML 标签、引号等）
-        """
-        json_objects = []
-        
-        # 状态机解析多个JSON对象
-        depth = 0
-        current_obj = ""
-        in_string = False
-        escape_next = False
-        
-        for char in raw_response:
-            if escape_next:
-                current_obj += char
-                escape_next = False
+    def parse_event_stream(raw_response: Union[str, bytes]) -> str:
+        """解析 AWS Event Stream 文本，提取其中的 {"content": "..."} 片段"""
+        if isinstance(raw_response, bytes):
+            buffer = raw_response.decode("utf-8", errors="ignore")
+        else:
+            buffer = raw_response or ""
+
+        contents: List[str] = []
+        remaining = buffer
+
+        while True:
+            json_str, remaining = extract_json_from_buffer(remaining)
+            if json_str is None:
+                break
+            try:
+                obj = json.loads(json_str)
+                text = obj.get("content")
+                if isinstance(text, str):
+                    contents.append(text)
+            except json.JSONDecodeError:
                 continue
-                
-            if char == '\\':
-                current_obj += char
-                escape_next = True
+
+        if contents:
+            return "".join(contents)
+
+        # 兜底：去掉 Amazon EventStream 的头部行，只返回可打印字符
+        printable_lines = []
+        for line in buffer.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith(":"):
                 continue
-            
-            if char == '"' and not escape_next:
-                in_string = not in_string
-            
-            if not in_string:
-                if char == '{':
-                    depth += 1
-                elif char == '}':
-                    depth -= 1
-            
-            current_obj += char
-            
-            # 当深度回到0且当前对象不为空时，说明一个JSON对象结束
-            if depth == 0 and current_obj.strip():
-                try:
-                    obj = json.loads(current_obj.strip())
-                    if 'content' in obj:
-                        json_objects.append(obj['content'])
-                    current_obj = ""
-                except json.JSONDecodeError:
-                    # 如果解析失败，继续累积字符
-                    pass
-        
-        # 拼接所有提取的内容
-        if json_objects:
-            return ''.join(json_objects)
-        
-        # 如果没有找到有效的JSON对象，返回原始内容
-        return raw_response
+            printable_lines.append(stripped)
+        return "\n".join(printable_lines)
 
     @staticmethod
     def amazonq_to_openai_response(
@@ -490,18 +575,28 @@ class OpenAIConverter:
         return response
 
     @staticmethod
-    def create_stream_chunk(content: str, model: str, chunk_type: str = "content", format_type: str = "openai") -> str:
+    def create_stream_chunk(
+            content: str,
+            model: str,
+            chunk_type: str = "content",
+            format_type: str = "openai",
+            message_id: Optional[str] = None,
+            final_text: Optional[str] = None
+    ) -> str:
         """创建 SSE 流式响应块
         
         chunk_type: 'start', 'content_start', 'content', 'content_end', 'end'
         """
         if format_type == "anthropic":
-            # Anthropic 格式
+            # Anthropic SSE 格式需要 event 字段
+            msg_id = message_id or f"msg_{uuid.uuid4().hex[:8]}"
+            event_name = ""
             if chunk_type == "start":
+                event_name = "message_start"
                 chunk = {
                     "type": "message_start",
                     "message": {
-                        "id": f"msg_{uuid.uuid4().hex[:8]}",
+                        "id": msg_id,
                         "type": "message",
                         "role": "assistant",
                         "content": [],
@@ -512,6 +607,7 @@ class OpenAIConverter:
                     }
                 }
             elif chunk_type == "content_start":
+                event_name = "content_block_start"
                 chunk = {
                     "type": "content_block_start",
                     "index": 0,
@@ -521,6 +617,7 @@ class OpenAIConverter:
                     }
                 }
             elif chunk_type == "content":
+                event_name = "content_block_delta"
                 chunk = {
                     "type": "content_block_delta",
                     "index": 0,
@@ -530,11 +627,13 @@ class OpenAIConverter:
                     }
                 }
             elif chunk_type == "content_end":
+                event_name = "content_block_stop"
                 chunk = {
                     "type": "content_block_stop",
                     "index": 0
                 }
-            else:  # end
+            elif chunk_type == "end":
+                event_name = "message_delta"
                 chunk = {
                     "type": "message_delta",
                     "delta": {
@@ -545,8 +644,40 @@ class OpenAIConverter:
                         "output_tokens": 0
                     }
                 }
+            else:  # stop
+                event_name = "message_stop"
+                chunk = {
+                    "type": "message_stop",
+                    "message": {
+                        "id": msg_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "model": model,
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": final_text or ""
+                            }
+                        ],
+                        "stop_reason": "end_turn",
+                        "stop_sequence": None,
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0
+                        }
+                    }
+                }
+
+            prefix = f"event: {event_name}\n" if event_name else ""
+            return f"{prefix}data: {json.dumps(chunk)}\n\n"
         else:
             # OpenAI 格式
+            delta: Dict[str, Any] = {}
+            if chunk_type == "start":
+                delta = {"role": "assistant", "content": ""}
+            elif chunk_type == "content":
+                delta = {"content": content}
+
             chunk = {
                 "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
                 "object": "chat.completion.chunk",
@@ -555,7 +686,7 @@ class OpenAIConverter:
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {"content": content} if chunk_type == "content" else {},
+                        "delta": delta,
                         "finish_reason": "stop" if chunk_type == "end" else None
                     }
                 ]
@@ -593,10 +724,46 @@ def _handle_chat_request(format_type: str = "openai"):
         # 提取参数 - 兼容 OpenAI 和 Anthropic 格式
         messages = data.get('messages', [])
         model = data.get('model', 'claude-sonnet-4.5')
-        stream = data.get('stream', False)
+
+        stream = _normalize_stream_flag(data.get('stream'))
+        if stream is None:
+            stream = _normalize_stream_flag(request.args.get('stream'))
+        if stream is None:
+            for key in ("response_mode", "responseMode", "response_format", "responseFormat"):
+                stream = _normalize_stream_flag(data.get(key))
+                if stream is not None:
+                    break
+        if stream is None:
+            if format_type == "anthropic":
+                stream = True
+            else:
+                accept_header = request.headers.get("Accept", "")
+                if accept_header and "text/event-stream" in accept_header.lower():
+                    stream = True
+
+        if stream is None or stream is False:
+            user_agent = (request.headers.get("User-Agent") or "").lower()
+            client_name = (
+                request.headers.get("X-Client-App")
+                or request.headers.get("X-App-Name")
+                or request.headers.get("X-Request-Client")
+                or ""
+            ).lower()
+            haystack = f"{user_agent} {client_name}".strip()
+            if haystack:
+                for hint in STREAMING_USER_AGENT_HINTS:
+                    if hint in haystack:
+                        stream = True
+                        logger.debug(f"检测到客户端 {haystack} 需要流式响应，自动启用 stream 模式")
+                        break
+
+        if stream is None:
+            stream = False
 
         if not messages:
             return jsonify({"error": "messages 参数不能为空"}), 400
+
+        request_id = f"req_{uuid.uuid4().hex}"
 
         # 转换消息
         content = converter.messages_to_content(messages)
@@ -641,10 +808,26 @@ def _handle_chat_request(format_type: str = "openai"):
             # 真正的流式响应 - 实时从 Amazon Q 读取并转发
             def generate():
                 try:
+                    message_id = f"msg_{uuid.uuid4().hex}"
+                    accumulated_content: List[str] = []
                     # 发送开始事件
                     if format_type == "anthropic":
-                        yield converter.create_stream_chunk("", model, chunk_type="start", format_type="anthropic")
-                        yield converter.create_stream_chunk("", model, chunk_type="content_start", format_type="anthropic")
+                        yield converter.create_stream_chunk(
+                            "",
+                            model,
+                            chunk_type="start",
+                            format_type="anthropic",
+                            message_id=message_id
+                        )
+                        yield converter.create_stream_chunk(
+                            "",
+                            model,
+                            chunk_type="content_start",
+                            format_type="anthropic",
+                            message_id=message_id
+                        )
+                    else:
+                        yield converter.create_stream_chunk("", model, chunk_type="start", format_type="openai")
                     
                     # 实时读取 Amazon Q 的流式响应
                     buffer = ""
@@ -669,7 +852,14 @@ def _handle_chat_request(format_type: str = "openai"):
                                         text = obj['content']
                                         # 立即发送这个文本片段
                                         if format_type == "anthropic":
-                                            yield converter.create_stream_chunk(text, model, chunk_type="content", format_type="anthropic")
+                                            accumulated_content.append(text)
+                                            yield converter.create_stream_chunk(
+                                                text,
+                                                model,
+                                                chunk_type="content",
+                                                format_type="anthropic",
+                                                message_id=message_id
+                                            )
                                         else:
                                             yield converter.create_stream_chunk(text, model, chunk_type="content", format_type="openai")
                                 except json.JSONDecodeError:
@@ -677,8 +867,29 @@ def _handle_chat_request(format_type: str = "openai"):
                     
                     # 发送结束事件
                     if format_type == "anthropic":
-                        yield converter.create_stream_chunk("", model, chunk_type="content_end", format_type="anthropic")
-                        yield converter.create_stream_chunk("", model, chunk_type="end", format_type="anthropic")
+                        final_text = "".join(accumulated_content)
+                        yield converter.create_stream_chunk(
+                            "",
+                            model,
+                            chunk_type="content_end",
+                            format_type="anthropic",
+                            message_id=message_id
+                        )
+                        yield converter.create_stream_chunk(
+                            "",
+                            model,
+                            chunk_type="end",
+                            format_type="anthropic",
+                            message_id=message_id
+                        )
+                        yield converter.create_stream_chunk(
+                            "",
+                            model,
+                            chunk_type="stop",
+                            format_type="anthropic",
+                            message_id=message_id,
+                            final_text=final_text
+                        )
                     else:
                         yield converter.create_stream_chunk("", model, chunk_type="end", format_type="openai")
                         yield "data: [DONE]\n\n"
@@ -697,7 +908,16 @@ def _handle_chat_request(format_type: str = "openai"):
                     }
                     yield f"data: {json.dumps(error_chunk)}\n\n"
 
-            return Response(generate(), mimetype='text/event-stream')
+            sse_headers = {
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "Content-Type": "text/event-stream; charset=utf-8"
+            }
+            if format_type == "anthropic":
+                sse_headers["anthropic-version"] = ANTHROPIC_API_VERSION
+                sse_headers["x-request-id"] = request_id
+            return Response(generate(), mimetype='text/event-stream', headers=sse_headers)
         else:
             # 非流式响应
             openai_response = converter.amazonq_to_openai_response(
@@ -728,7 +948,10 @@ def _handle_chat_request(format_type: str = "openai"):
                         "output_tokens": 0
                     }
                 }
-                return jsonify(anthropic_response)
+                response = jsonify(anthropic_response)
+                response.headers['anthropic-version'] = ANTHROPIC_API_VERSION
+                response.headers['x-request-id'] = request_id
+                return response
             else:
                 return jsonify(openai_response)
 
@@ -776,13 +999,26 @@ def set_credentials():
     """设置 Amazon Q 凭证"""
     try:
         credentials = request.json
-        required_fields = ['refresh_token', 'client_id', 'client_secret']
+        field_aliases = {
+            "refresh_token": ["refresh_token", "refreshToken"],
+            "client_id": ["client_id", "clientId"],
+            "client_secret": ["client_secret", "clientSecret"]
+        }
+        normalized = {}
+        missing = []
+        for canonical, aliases in field_aliases.items():
+            value = next((credentials.get(name) for name in aliases if credentials.get(name)), None)
+            if not value:
+                missing.append(canonical)
+            else:
+                normalized[canonical] = value
 
-        for field in required_fields:
-            if field not in credentials:
-                return jsonify({
-                    "error": f"缺少必需字段: {field}"
-                }), 400
+        if missing:
+            return jsonify({
+                "error": f"缺少必需字段: {', '.join(missing)}"
+            }), 400
+
+        credentials.update(normalized)
 
         auth_manager.set_credentials(credentials)
 

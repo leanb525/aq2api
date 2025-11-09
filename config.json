@@ -1,6 +1,6 @@
 {
   "logging": {
-    "enabled": false,
+    "enabled": true,
     "level": "INFO",
     "log_requests": true,
     "log_responses": true,
