@@ -1,0 +1,162 @@
+Amazon Q to OpenAI/Anthropic API Bridge - Cloudflare Worker
+============================================================
+
+PROJECT STRUCTURE
+-----------------
+
+Root Directory:
+├── src/
+│   └── index.ts                    # Main Cloudflare Worker application (TypeScript)
+│
+├── Configuration Files:
+│   ├── wrangler.toml              # Cloudflare Worker configuration
+│   ├── package.json               # Node.js dependencies and scripts
+│   ├── tsconfig.json              # TypeScript compiler configuration
+│   ├── .gitignore                 # Git ignore patterns
+│   └── .dev.vars.example          # Example local environment variables
+│
+├── Documentation:
+│   ├── README_CLOUDFLARE.md       # Main README for Cloudflare version
+│   ├── QUICK_START.md             # 5-minute quick start guide
+│   ├── CLOUDFLARE_DEPLOYMENT.md   # Comprehensive deployment guide
+│   ├── MIGRATION_SUMMARY.md       # Python to Cloudflare migration details
+│   └── PROJECT_STRUCTURE.txt      # This file
+│
+├── Scripts:
+│   └── setup-credentials.sh       # Interactive credential setup script
+│
+└── Original Python Files (reference):
+    ├── main.py                    # Original Flask application
+    ├── info.py                    # Original info script
+    ├── config.json                # Original configuration
+    ├── amazonq_credentials.json   # Original credentials template
+    └── README.md                  # Original Python README
+
+MAIN APPLICATION (src/index.ts)
+-------------------------------
+
+Core Components:
+1. Environment Interface (Env)
+   - Defines worker environment variables and KV namespace
+   
+2. AmazonQAuthManager
+   - Manages OAuth tokens
+   - Automatic token refresh
+   - KV-based credential storage
+   
+3. AmazonQClient
+   - Handles Amazon Q API requests
+   - Automatic retry on 403 errors
+   - Streaming support
+   
+4. OpenAIConverter
+   - Format conversion utilities
+   - OpenAI ↔ Anthropic format translation
+   - Event stream parsing
+   - SSE chunk generation
+
+5. Request Handlers
+   - handleChatRequest() - Main chat endpoint handler
+   - OpenAI and Anthropic format support
+   - Streaming and non-streaming modes
+
+API ENDPOINTS
+-------------
+
+POST /v1/chat/completions       OpenAI compatible chat endpoint
+POST /v1/messages               Anthropic compatible messages endpoint
+GET  /v1/models                 List available models
+POST /credentials               Update stored credentials
+GET  /health                    Health check endpoint
+GET  /                          API information
+
+SUPPORTED MODELS
+----------------
+
+- claude-sonnet-4.5 (default)
+- claude-sonnet-4
+- amazon-q
+
+DEPLOYMENT COMMANDS
+-------------------
+
+npm install                     Install dependencies
+npx wrangler login             Login to Cloudflare
+./setup-credentials.sh         Setup Amazon Q credentials interactively
+npm run dev                    Run locally (http://localhost:8787)
+npm run deploy                 Deploy to development environment
+npm run deploy:production      Deploy to production environment
+npm run tail                   View real-time logs
+npx wrangler secret put NAME   Set a secret manually
+
+REQUIRED SECRETS
+----------------
+
+CLIENT_ID                      Amazon Q OAuth client ID
+CLIENT_SECRET                  Amazon Q OAuth client secret
+REFRESH_TOKEN                  Amazon Q OAuth refresh token
+ACCESS_TOKEN                   (Optional) Amazon Q access token
+
+OPTIONAL CONFIGURATION
+----------------------
+
+AMAZONQ_ENDPOINT              Amazon Q API endpoint
+SSO_OIDC_ENDPOINT            AWS SSO OIDC endpoint
+LOG_REQUESTS                  Enable request logging
+LOG_RESPONSES                 Enable response logging
+TOKEN_REFRESH_MARGIN          Token refresh margin (seconds)
+
+FEATURES
+--------
+
+✓ OpenAI API compatible
+✓ Anthropic API compatible
+✓ Streaming support (SSE)
+✓ Automatic token refresh
+✓ Global edge deployment
+✓ Auto-scaling
+✓ CORS support
+✓ Comprehensive error handling
+✓ Zero infrastructure management
+
+ADVANTAGES
+----------
+
+• Global: Deployed to 270+ Cloudflare edge locations
+• Fast: Low latency from anywhere in the world
+• Scalable: Handles any load automatically
+• Cost-effective: Free tier includes 100,000 requests/day
+• Secure: Built-in DDoS protection, automatic HTTPS
+• Simple: No servers, containers, or infrastructure to manage
+• Reliable: 100% uptime SLA on paid plans
+
+DIFFERENCES FROM PYTHON VERSION
+--------------------------------
+
+Runtime:          Python Flask → TypeScript on Cloudflare Workers
+Deployment:       Self-hosted → Serverless edge
+Storage:          File system + SQLite → KV namespace
+Scaling:          Manual → Automatic
+Global presence:  Single location → 270+ locations
+Cost:             Server hosting → Free tier or $5/month
+Maintenance:      Regular updates → Zero maintenance
+
+GETTING STARTED
+---------------
+
+1. Read QUICK_START.md for immediate deployment
+2. Read CLOUDFLARE_DEPLOYMENT.md for detailed instructions
+3. Read MIGRATION_SUMMARY.md for migration details
+
+SUPPORT RESOURCES
+-----------------
+
+Cloudflare Workers Docs:  https://developers.cloudflare.com/workers/
+Wrangler CLI Docs:        https://developers.cloudflare.com/workers/wrangler/
+View Logs:                npm run tail
+Dashboard:                https://dash.cloudflare.com/
+
+LICENSE
+-------
+
+MIT License

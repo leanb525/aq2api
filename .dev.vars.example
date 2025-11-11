@@ -1,0 +1,17 @@
+# Example development environment variables
+# Copy this file to .dev.vars and fill in your actual credentials
+# .dev.vars is used for local development with 'wrangler dev'
+
+CLIENT_ID=your-client-id-here
+CLIENT_SECRET=your-client-secret-here
+REFRESH_TOKEN=your-refresh-token-here
+ACCESS_TOKEN=your-access-token-here
+
+# Optional: Override endpoints
+# AMAZONQ_ENDPOINT=https://codewhisperer.us-east-1.amazonaws.com
+# SSO_OIDC_ENDPOINT=https://oidc.us-east-1.amazonaws.com
+
+# Optional: Logging configuration
+# LOG_REQUESTS=true
+# LOG_RESPONSES=true
+# TOKEN_REFRESH_MARGIN=300

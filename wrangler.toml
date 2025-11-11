@@ -1,0 +1,36 @@
+name = "amazonq-openai-bridge"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# Account ID (you'll need to replace this with your own)
+# Get it from: wrangler whoami
+# account_id = "your-account-id-here"
+
+# KV Namespace for storing credentials (optional but recommended)
+# Create it with: wrangler kv:namespace create "CREDENTIALS"
+# [[kv_namespaces]]
+# binding = "CREDENTIALS"
+# id = "your-kv-namespace-id-here"
+
+# Environment variables
+# You can set these via Cloudflare dashboard or wrangler secrets
+[vars]
+AMAZONQ_ENDPOINT = "https://codewhisperer.us-east-1.amazonaws.com"
+SSO_OIDC_ENDPOINT = "https://oidc.us-east-1.amazonaws.com"
+LOG_REQUESTS = "true"
+LOG_RESPONSES = "true"
+TOKEN_REFRESH_MARGIN = "300"
+
+# Secrets (set with: wrangler secret put <NAME>)
+# CLIENT_ID
+# CLIENT_SECRET
+# REFRESH_TOKEN
+# ACCESS_TOKEN (optional, will be auto-refreshed)
+
+# Development configuration
+[env.dev]
+name = "amazonq-openai-bridge-dev"
+
+# Production configuration
+[env.production]
+name = "amazonq-openai-bridge"
