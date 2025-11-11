@@ -1,5 +1,9 @@
 ## Amazon Q → OpenAI / Anthropic Bridge (Flask Edition)
 
+
+
+## 大家可以看我的 [Cloudflare Worker 版本部署（更加方便）](https://github.com/leanb525/aq2worker)
+
 把 **Amazon Q Developer** 的 Claude 能力转成兼容 **OpenAI Chat Completions** 与 **Anthropic Messages** 的本地服务，方便在 Claude Code、Cursor、Continue、Open WebUI 等工具中复用同一个模型入口。
 
 ---
